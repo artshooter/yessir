@@ -1,6 +1,6 @@
 {
   "name": "@artshooter/yessir",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Claude Code session monitor — track and auto-approve multiple sessions in a TUI dashboard",
   "bin": {
     "yessir": "./bin/cli.js"
