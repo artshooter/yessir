@@ -1,7 +1,8 @@
 use std::env;
+use std::fs::OpenOptions;
 use std::io::{Read, Write};
 use std::net::TcpStream;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 fn main() {
     // 读取命令行参数：yessir-hook SessionStart
@@ -13,9 +14,18 @@ fn main() {
 
     // 从 stdin 读 JSON（Claude Code 通过 stdin 传入事件数据）
     let mut input = String::new();
-    let mut data: serde_json::Value = if std::io::stdin().read_to_string(&mut input).is_ok()
-        && !input.is_empty()
-    {
+
+    // DEBUG: 把原始输入写到 /tmp/yessir-debug.log
+    if std::io::stdin().read_to_string(&mut input).is_ok() {
+        if let Ok(mut f) = OpenOptions::new().create(true).append(true).open("/tmp/yessir-debug.log") {
+            let ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+            let _ = writeln!(f, "=== {} | {} ===", ts, event_name);
+            let _ = writeln!(f, "{}", input);
+            let _ = writeln!(f, "---");
+        }
+    }
+
+    let mut data: serde_json::Value = if !input.is_empty() {
         serde_json::from_str(&input).unwrap_or(serde_json::Value::Object(Default::default()))
     } else {
         serde_json::Value::Object(Default::default())

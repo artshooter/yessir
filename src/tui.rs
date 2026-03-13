@@ -2,8 +2,37 @@ use crate::state::{SessionStatus, StateManager, Session};
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use ratatui::prelude::*;
 use ratatui::DefaultTerminal;
-use ratatui::widgets::Paragraph;
+use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+// ========== 配色方案 ==========
+
+mod theme {
+    use ratatui::style::Color;
+
+    // 透明背景，跟随终端主题
+    pub const BG: Color = Color::Reset;
+    pub const FG: Color = Color::Reset;
+    pub const HEADER_FG: Color = Color::DarkGray;
+    pub const BORDER: Color = Color::DarkGray;
+    pub const TITLE: Color = Color::Cyan;
+    pub const SELECTED_BG: Color = Color::Rgb(60, 60, 70);
+    pub const SELECTED_FG: Color = Color::White;
+
+    pub const STATUS_WAITING: Color = Color::Yellow;
+    pub const STATUS_ACTIVE: Color = Color::Green;
+    pub const STATUS_RUNNING: Color = Color::Cyan;
+    pub const STATUS_IDLE: Color = Color::Blue;
+    pub const STATUS_STOPPED: Color = Color::Red;
+    pub const STATUS_STARTING: Color = Color::DarkGray;
+
+    pub const MODE_ALLOW: Color = Color::Green;
+    pub const MODE_MANUAL: Color = Color::Yellow;
+
+    pub const DETAIL_FG: Color = Color::Yellow;
+    pub const FOOTER_FG: Color = Color::DarkGray;
+    pub const MSG_FG: Color = Color::Cyan;
+}
 
 // ========== 工具函数 ==========
 
@@ -14,10 +43,9 @@ fn now() -> f64 {
         .as_secs_f64()
 }
 
-/// 把时间戳格式化为 "3s" / "5m" / "2h"
 fn format_time_ago(t: f64) -> String {
     if t == 0.0 {
-        return String::new();
+        return "—".to_string();
     }
     let delta = now() - t;
     if delta < 60.0 {
@@ -29,7 +57,6 @@ fn format_time_ago(t: f64) -> String {
     }
 }
 
-/// 从完整路径提取项目名："/Users/as/yessir" → "yessir"
 fn get_project_name(cwd: &str) -> &str {
     if cwd.is_empty() {
         return "?";
@@ -37,16 +64,92 @@ fn get_project_name(cwd: &str) -> &str {
     cwd.rsplit('/').next().unwrap_or(cwd)
 }
 
+/// 按列宽折行，最多保留 max_lines 行，超出部分用 "…" 表示
+fn wrap_text(s: &str, col_width: usize, max_lines: usize) -> String {
+    use unicode_width::UnicodeWidthChar;
+
+    if col_width == 0 || max_lines == 0 {
+        return String::new();
+    }
+
+    let clean = s.replace('\r', "");
+    let mut wrapped: Vec<String> = Vec::new();
+
+    for line in clean.lines() {
+        if line.is_empty() {
+            wrapped.push(String::new());
+        } else {
+            let mut cur = String::new();
+            let mut cur_w: usize = 0;
+
+            for ch in line.chars() {
+                let w = UnicodeWidthChar::width(ch).unwrap_or(0);
+                if cur_w + w > col_width && cur_w > 0 {
+                    wrapped.push(cur);
+                    cur = String::new();
+                    cur_w = 0;
+                }
+                cur.push(ch);
+                cur_w += w;
+            }
+            if !cur.is_empty() {
+                wrapped.push(cur);
+            }
+        }
+        if wrapped.len() > max_lines {
+            break;
+        }
+    }
+
+    if wrapped.len() > max_lines {
+        wrapped.truncate(max_lines);
+        if let Some(last) = wrapped.last_mut() {
+            last.push('…');
+        }
+    }
+
+    wrapped.join("\n")
+}
+
+/// 在文本前加空行，使其在 row_height 行内垂直居中
+fn vcenter(text: &str, row_height: u16) -> String {
+    let lines = text.lines().count().max(1);
+    let pad = (row_height as usize).saturating_sub(lines) / 2;
+    if pad == 0 {
+        return text.to_string();
+    }
+    let mut result = "\n".repeat(pad);
+    result.push_str(text);
+    result
+}
+
+fn status_color(status: SessionStatus) -> Color {
+    match status {
+        SessionStatus::Waiting => theme::STATUS_WAITING,
+        SessionStatus::Active => theme::STATUS_ACTIVE,
+        SessionStatus::Running => theme::STATUS_RUNNING,
+        SessionStatus::Idle => theme::STATUS_IDLE,
+        SessionStatus::Stopped => theme::STATUS_STOPPED,
+        SessionStatus::Starting => theme::STATUS_STARTING,
+    }
+}
+
+fn mode_text_and_color(auto_reply: &Option<String>) -> (&str, Color) {
+    match auto_reply.as_deref() {
+        Some("allow") => ("全通过", theme::MODE_ALLOW),
+        None => ("手动", theme::MODE_MANUAL),
+        _ => ("全通过", theme::MODE_ALLOW),
+    }
+}
+
 // ========== TUI 主结构 ==========
 
 pub struct TUI {
     state: StateManager,
     port: u16,
-    selected: usize,            // 当前选中的行
-    message: String,            // 底部提示消息
-    message_time: f64,          // 消息显示时间
-    input_mode: bool,           // 是否在输入模式
-    input_buffer: String,       // 输入框内容
+    table_state: TableState,
+    message: String,
+    message_time: f64,
 }
 
 impl TUI {
@@ -54,18 +157,16 @@ impl TUI {
         Self {
             state,
             port,
-            selected: 0,
+            table_state: TableState::default().with_selected(0),
             message: String::new(),
             message_time: 0.0,
-            input_mode: false,
-            input_buffer: String::new(),
         }
     }
 
     pub fn run(&mut self) -> std::io::Result<()> {
-        let mut terminal = ratatui::init();       // 进入终端 raw 模式
+        let mut terminal = ratatui::init();
         let result = self.main_loop(&mut terminal);
-        ratatui::restore();                        // 恢复正常终端
+        ratatui::restore();
         result
     }
 
@@ -75,29 +176,27 @@ impl TUI {
 
             // 防止选中行越界
             if !sessions.is_empty() {
-                self.selected = self.selected.min(sessions.len() - 1);
+                let sel = self.table_state.selected().unwrap_or(0);
+                if sel >= sessions.len() {
+                    self.table_state.select(Some(sessions.len() - 1));
+                }
             } else {
-                self.selected = 0;
+                self.table_state.select(Some(0));
             }
 
-            // 画界面（类似 React 的 render）
             terminal.draw(|frame| self.render(frame, &sessions))?;
 
-            // 等 1 秒或等键盘事件（类似 addEventListener）
             if event::poll(Duration::from_secs(1))? {
                 if let Event::Key(key) = event::read()? {
                     if key.kind != KeyEventKind::Press {
                         continue;
                     }
-                    // Ctrl+C 退出
                     if key.code == KeyCode::Char('c')
                         && key.modifiers.contains(event::KeyModifiers::CONTROL)
                     {
                         return Ok(());
                     }
-                    if self.input_mode {
-                        self.handle_input_key(key.code, &sessions);
-                    } else if self.handle_normal_key(key.code, &sessions) {
+                    if self.handle_normal_key(key.code, &sessions) {
                         return Ok(());
                     }
                 }
@@ -107,177 +206,212 @@ impl TUI {
 
     // ========== 渲染 ==========
 
-    fn render(&self, frame: &mut Frame, sessions: &[Session]) {
+    fn render(&mut self, frame: &mut Frame, sessions: &[Session]) {
         let area = frame.area();
 
-        // 把终端分成 7 行：标题、分隔线、列头、分隔线、内容区、分隔线、底栏
+        // 全局背景
+        frame.render_widget(
+            Block::default().style(Style::default().bg(theme::BG)),
+            area,
+        );
+
+        // 三段式布局：标题栏、主表格、底栏
         let chunks = Layout::vertical([
-            Constraint::Length(1), // 标题
-            Constraint::Length(1), // ─── 分隔线
-            Constraint::Length(1), // 列头
-            Constraint::Length(1), // ─── 分隔线
-            Constraint::Min(1),   // 会话列表（占剩余空间）
-            Constraint::Length(1), // ─── 分隔线
-            Constraint::Length(1), // 底栏（快捷键提示 / 输入框）
+            Constraint::Length(3), // 标题栏（含边框）
+            Constraint::Min(5),   // 主表格
+            Constraint::Length(3), // 底栏
         ])
         .split(area);
 
-        // 标题
-        let header = format!(
-            " Yes! Sir  │  {} sessions  │  port {}",
-            sessions.len(),
-            self.port
-        );
-        frame.render_widget(Paragraph::new(header).bold(), chunks[0]);
-
-        // 分隔线
-        let separator = "─".repeat(area.width as usize);
-        frame.render_widget(Paragraph::new(separator.clone()), chunks[1]);
-
-        // 列头
-        let col_header = format!(
-            " {:<3} {:<20} {:<40} {:<8} {:<6} {:<5}",
-            "#", "Project", "Last Input", "Status", "Auto", "Age"
-        );
-        frame.render_widget(Paragraph::new(col_header).dim(), chunks[2]);
-
-        // 分隔线
-        frame.render_widget(Paragraph::new(separator.clone()), chunks[3]);
-
-        // 会话列表
-        self.render_sessions(frame, sessions, chunks[4]);
-
-        // 分隔线
-        frame.render_widget(Paragraph::new(separator), chunks[5]);
-
-        // 底栏
-        self.render_footer(frame, chunks[6]);
+        self.render_header(frame, chunks[0], sessions.len());
+        self.render_table(frame, chunks[1], sessions);
+        self.render_footer(frame, chunks[2]);
     }
 
-    fn render_sessions(&self, frame: &mut Frame, sessions: &[Session], area: Rect) {
-        if sessions.is_empty() {
-            frame.render_widget(
-                Paragraph::new(" No active sessions. Start Claude Code to see sessions here.")
-                    .dim(),
-                area,
+    fn render_header(&self, frame: &mut Frame, area: Rect, count: usize) {
+        let title_text = format!("  Yes! Sir  │  {} sessions  │  port {}", count, self.port);
+        let title = Paragraph::new(title_text)
+            .style(Style::default().fg(theme::TITLE).bg(theme::BG).bold())
+            .block(
+                Block::default()
+                    .borders(Borders::BOTTOM)
+                    .border_style(Style::default().fg(theme::BORDER))
+                    .style(Style::default().bg(theme::BG)),
             );
+        frame.render_widget(title, area);
+    }
+
+    fn render_table(&mut self, frame: &mut Frame, area: Rect, sessions: &[Session]) {
+        let row_height: u16 = 3;
+
+        if sessions.is_empty() {
+            let empty = Paragraph::new("  No active sessions. Start Claude Code to see sessions here.")
+                .style(Style::default().fg(theme::FOOTER_FG).bg(theme::BG).italic())
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(theme::BORDER))
+                        .title(" Sessions ")
+                        .title_style(Style::default().fg(theme::HEADER_FG).bold())
+                        .style(Style::default().bg(theme::BG)),
+                );
+            frame.render_widget(empty, area);
             return;
         }
 
-        let mut y = 0u16;
+        // 计算 Fill 列的实际宽度（用于手动折行）
+        let fixed_total: u16 = 4 + 20 + 10 + 8 + 12 + 6; // 固定列宽之和
+        let spacers: u16 = 7; // 8 列之间 7 个间距（默认间距 1）
+        let inner_width = area.width.saturating_sub(2); // 减去左右边框
+        let fill_total = inner_width.saturating_sub(fixed_total + spacers);
+        let output_col_w = (fill_total * 2 / 6) as usize; // Fill(2)
+        let input_col_w = (fill_total * 4 / 6) as usize;  // Fill(4)
+
+        // 构建表格行
+        let mut rows: Vec<Row> = Vec::new();
+
         for (i, session) in sessions.iter().enumerate() {
-            if y >= area.height {
-                break;
-            }
-
-            // 格式化每一列
             let project = get_project_name(&session.cwd);
+            let last_output = if session.last_output.is_empty() {
+                "—".to_string()
+            } else {
+                wrap_text(&session.last_output, output_col_w, row_height as usize)
+            };
             let last_input = if session.last_input.is_empty() {
-                "-"
+                "—".to_string()
             } else {
-                &session.last_input
+                wrap_text(&session.last_input, input_col_w, row_height as usize)
             };
-            let last_input_clean: String = last_input.replace('\n', " ").replace('\r', " ");
+            let perm = if session.last_permission.is_empty() {
+                "—".to_string()
+            } else {
+                session.last_permission.clone()
+            };
             let status_text = session.status.label();
-            let auto = session.auto_reply.as_deref().unwrap_or("-");
+            let (mode_text, mode_color) = mode_text_and_color(&session.auto_reply);
             let age = format_time_ago(session.last_event_time);
+            let s_color = status_color(session.status);
 
-            let line = format!(
-                " {:<3} {:<20.20} {:<40.40} {:<8} {:<6} {:<5}",
-                i + 1,
-                project,
-                last_input_clean,
-                status_text,
-                auto,
-                age,
-            );
-
-            // 根据状态选颜色
-            let style = if i == self.selected {
-                Style::default().bg(Color::Blue).fg(Color::White).bold()
+            let h = row_height;
+            let selected = self.table_state.selected() == Some(i);
+            let idx_label = if selected {
+                format!("▶{}", i + 1)
             } else {
-                match session.status {
-                    SessionStatus::Waiting => Style::default().fg(Color::Yellow).bold(),
-                    SessionStatus::Active | SessionStatus::Running => {
-                        Style::default().fg(Color::Green)
-                    }
-                    SessionStatus::Idle => Style::default().fg(Color::Cyan),
-                    SessionStatus::Stopped => Style::default().fg(Color::Red).dim(),
-                    SessionStatus::Starting => Style::default().dim(),
-                }
+                format!(" {}", i + 1)
             };
+            let row = Row::new(vec![
+                Cell::from(vcenter(&idx_label, h)).style(Style::default().fg(if selected { theme::SELECTED_FG } else { theme::HEADER_FG })),
+                Cell::from(vcenter(project, h)).style(Style::default().fg(theme::FG).bold()),
+                Cell::from(vcenter(&last_output, h)).style(Style::default().fg(theme::FG)),
+                Cell::from(vcenter(&last_input, h)).style(Style::default().fg(theme::FG)),
+                Cell::from(vcenter(&perm, h)).style(Style::default().fg(theme::FG)),
+                Cell::from(vcenter(&format!(" {} ", status_text), h)).style(Style::default().fg(s_color).bold()),
+                Cell::from(vcenter(mode_text, h)).style(Style::default().fg(mode_color)),
+                Cell::from(vcenter(&age, h)).style(Style::default().fg(theme::HEADER_FG)),
+            ]).height(row_height);
 
-            let row_area = Rect::new(area.x, area.y + y, area.width, 1);
-            frame.render_widget(Paragraph::new(line).style(style), row_area);
-            y += 1;
-
-            // 选中行 + 等待状态：显示工具详情
-            if i == self.selected && session.status == SessionStatus::Waiting {
-                if let Some(ref detail) = session.waiting_detail {
-                    if y < area.height {
-                        let inp_str = if let Some(obj) = detail.tool_input.as_object() {
-                            obj.get("command")
-                                .or_else(|| obj.get("file_path"))
-                                .and_then(|v| v.as_str())
-                                .map(|s| s.to_string())
-                                .unwrap_or_else(|| detail.tool_input.to_string())
-                        } else {
-                            detail.tool_input.to_string()
-                        };
-                        let detail_line = format!("     ↳ {}: {}", detail.tool_name, inp_str);
-                        let detail_area = Rect::new(area.x, area.y + y, area.width, 1);
-                        frame.render_widget(
-                            Paragraph::new(detail_line).fg(Color::Yellow),
-                            detail_area,
-                        );
-                        y += 1;
-                    }
-                }
-            }
+            rows.push(row);
         }
+
+        // 表头
+        let header = Row::new(vec![
+            Cell::from(" #"),
+            Cell::from("Project"),
+            Cell::from("Last Output"),
+            Cell::from("Last Input"),
+            Cell::from("Perm"),
+            Cell::from("Status"),
+            Cell::from("Mode"),
+            Cell::from("Age"),
+        ])
+        .style(Style::default().fg(theme::HEADER_FG).bold())
+        .bottom_margin(1);
+
+        // 列宽：Last Output = Fill(2), Last Input = Fill(4), Perm 缩小, Mode 加宽
+        let widths = [
+            Constraint::Length(4),    // #
+            Constraint::Length(20),   // Project
+            Constraint::Fill(2),     // Last Output (Last Input 的一半)
+            Constraint::Fill(4),     // Last Input
+            Constraint::Length(10),  // Perm (缩小)
+            Constraint::Length(8),   // Status
+            Constraint::Length(12),  // Mode (加宽)
+            Constraint::Length(6),   // Age
+        ];
+
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(theme::BORDER))
+            .title(" Sessions ")
+            .title_style(Style::default().fg(theme::HEADER_FG).bold())
+            .style(Style::default().bg(theme::BG));
+
+        let table = Table::new(rows, widths)
+            .header(header)
+            .row_highlight_style(
+                Style::default()
+                    .bg(theme::SELECTED_BG)
+                    .fg(theme::SELECTED_FG)
+                    .bold(),
+            )
+            .highlight_spacing(ratatui::widgets::HighlightSpacing::Never)
+            .style(Style::default().bg(theme::BG));
+
+        let table = table.block(block);
+        frame.render_stateful_widget(table, area, &mut self.table_state);
     }
 
     fn render_footer(&self, frame: &mut Frame, area: Rect) {
-        if self.input_mode {
-            let prompt = format!(
-                " Auto-reply (allow/deny/empty to cancel): {}█",
-                self.input_buffer
-            );
-            frame.render_widget(Paragraph::new(prompt), area);
-        } else if !self.message.is_empty() && (now() - self.message_time < 3.0) {
-            frame.render_widget(Paragraph::new(format!(" {}", self.message)).bold(), area);
+        let content = if !self.message.is_empty() && (now() - self.message_time < 1.0) {
+            Paragraph::new(format!("  {}", self.message))
+                .style(Style::default().fg(theme::MSG_FG).bg(theme::BG).bold())
         } else {
-            frame.render_widget(
-                Paragraph::new(" ↑↓ Select  a Auto-reply  d Clear  r Refresh  q Quit").dim(),
-                area,
-            );
-        }
+            let keys = vec![
+                Span::styled("  ↑↓", Style::default().fg(theme::TITLE).bold()),
+                Span::styled(" Select  ", Style::default().fg(theme::FOOTER_FG)),
+                Span::styled("←→", Style::default().fg(theme::TITLE).bold()),
+                Span::styled(" Mode  ", Style::default().fg(theme::FOOTER_FG)),
+                Span::styled("r", Style::default().fg(theme::TITLE).bold()),
+                Span::styled(" Refresh  ", Style::default().fg(theme::FOOTER_FG)),
+                Span::styled("q", Style::default().fg(theme::TITLE).bold()),
+                Span::styled(" Quit", Style::default().fg(theme::FOOTER_FG)),
+            ];
+            Paragraph::new(Line::from(keys))
+                .style(Style::default().bg(theme::BG))
+        };
+
+        let footer = content.block(
+            Block::default()
+                .borders(Borders::TOP)
+                .border_style(Style::default().fg(theme::BORDER))
+                .style(Style::default().bg(theme::BG)),
+        );
+        frame.render_widget(footer, area);
     }
 
     // ========== 键盘处理 ==========
 
-    /// 返回 true 表示退出
     fn handle_normal_key(&mut self, key: KeyCode, sessions: &[Session]) -> bool {
         match key {
             KeyCode::Char('q') => return true,
             KeyCode::Up | KeyCode::Char('k') => {
-                self.selected = self.selected.saturating_sub(1);
+                let sel = self.table_state.selected().unwrap_or(0);
+                self.table_state.select(Some(sel.saturating_sub(1)));
             }
             KeyCode::Down | KeyCode::Char('j') => {
                 if !sessions.is_empty() {
-                    self.selected = (self.selected + 1).min(sessions.len() - 1);
+                    let sel = self.table_state.selected().unwrap_or(0);
+                    self.table_state.select(Some((sel + 1).min(sessions.len() - 1)));
                 }
             }
-            KeyCode::Char('a') => {
-                if !sessions.is_empty() {
-                    self.input_mode = true;
-                    self.input_buffer.clear();
-                }
-            }
-            KeyCode::Char('d') => {
-                if let Some(session) = sessions.get(self.selected) {
-                    self.state.set_auto_reply(&session.session_id, None);
-                    self.show_message("Auto-reply cleared");
+            KeyCode::Right | KeyCode::Left | KeyCode::Char('l') | KeyCode::Char('h') => {
+                let sel = self.table_state.selected().unwrap_or(0);
+                if let Some(session) = sessions.get(sel) {
+                    let next = match session.auto_reply.as_deref() {
+                        None => Some("allow".to_string()),
+                        _ => None,
+                    };
+                    self.state.set_auto_reply(&session.session_id, next);
                 }
             }
             KeyCode::Char('r') => {
@@ -286,42 +420,6 @@ impl TUI {
             _ => {}
         }
         false
-    }
-
-    fn handle_input_key(&mut self, key: KeyCode, sessions: &[Session]) {
-        match key {
-            KeyCode::Esc => {
-                self.input_mode = false;
-                self.input_buffer.clear();
-            }
-            KeyCode::Enter => {
-                self.input_mode = false;
-                let value = self.input_buffer.trim().to_lowercase();
-                self.input_buffer.clear();
-                if let Some(session) = sessions.get(self.selected) {
-                    match value.as_str() {
-                        "allow" | "deny" => {
-                            self.state
-                                .set_auto_reply(&session.session_id, Some(value.clone()));
-                            self.show_message(&format!("Auto-reply set to: {}", value));
-                        }
-                        "" => {
-                            self.show_message("Cancelled");
-                        }
-                        _ => {
-                            self.show_message("Invalid: use 'allow' or 'deny'");
-                        }
-                    }
-                }
-            }
-            KeyCode::Backspace => {
-                self.input_buffer.pop();
-            }
-            KeyCode::Char(c) => {
-                self.input_buffer.push(c);
-            }
-            _ => {}
-        }
     }
 
     fn show_message(&mut self, msg: &str) {

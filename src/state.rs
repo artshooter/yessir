@@ -49,27 +49,37 @@ pub struct Session {
     pub permission_mode: String,
     pub status: SessionStatus,
     pub last_input: String,
+    pub last_output: String,
     pub last_input_time: f64,
     pub current_tool: String,
     pub waiting_detail: Option<WaitingDetail>,
+    pub last_permission: String,
     pub auto_reply: Option<String>,
     pub last_event_time: f64,
+    pub created_at: f64,
     pub model: String,
 }
 
 impl Session {
     pub fn new(session_id: String) -> Self {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs_f64();
         Self {
             session_id,
             cwd: String::new(),
             permission_mode: String::new(),
             status: SessionStatus::Starting,
             last_input: String::new(),
+            last_output: String::new(),
             last_input_time: 0.0,
             current_tool: String::new(),
             waiting_detail: None,
+            last_permission: String::new(),
             auto_reply: Some("allow".to_string()),
             last_event_time: 0.0,
+            created_at: now,
             model: String::new(),
         }
     }
@@ -147,6 +157,7 @@ impl StateManager {
             "PermissionRequest" => {
                 let tool_name = data.get("tool_name").and_then(|v| v.as_str()).unwrap_or("").to_string();
                 let tool_input = data.get("tool_input").cloned().unwrap_or(Value::Object(Default::default()));
+                session.last_permission = tool_name.clone();
                 session.status = SessionStatus::Waiting;
                 session.waiting_detail = Some(WaitingDetail {
                     tool_name,
@@ -183,6 +194,11 @@ impl StateManager {
                 session.current_tool = String::new();
                 session.waiting_detail = None;
                 session.last_event_time = now;
+                if let Some(resp) = data.get("response").and_then(|v| v.as_str()) {
+                    if !resp.is_empty() {
+                        session.last_output = resp.to_string();
+                    }
+                }
             }
             "SessionEnd" => {
                 session.status = SessionStatus::Stopped;
@@ -202,7 +218,7 @@ impl StateManager {
             .filter(|s| s.status != SessionStatus::Stopped)
             .cloned()
             .collect();
-        list.sort_by(|a, b| b.last_event_time.partial_cmp(&a.last_event_time).unwrap_or(std::cmp::Ordering::Equal));
+        list.sort_by(|a, b| a.created_at.partial_cmp(&b.created_at).unwrap_or(std::cmp::Ordering::Equal));
         list
     }
 
