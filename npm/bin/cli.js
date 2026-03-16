@@ -26,8 +26,9 @@ async function main() {
       const profile = addToPath();
       console.log("\nyessir installed successfully!");
       if (profile) {
+        const shellName = path.basename(profile, path.extname(profile)).replace('.', '');
         console.log(`Added ~/.yessir/bin to PATH in ${profile}`);
-        console.log("Restart your terminal, then run `yessir` to start the dashboard.");
+        console.log(`\nTo start using yessir now, run:\n  source ${profile}\n  yessir`);
       } else {
         console.log("Run `yessir` to start the dashboard.");
       }

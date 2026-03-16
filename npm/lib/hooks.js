@@ -22,13 +22,19 @@ function hookCommand(event) {
   return `${shellQuote(binPath)} ${event}`;
 }
 
-// Exact match: must be type "command" with our exact command string
-function isOurHook(entry, event) {
-  return (
-    entry &&
-    entry.type === "command" &&
-    entry.command === hookCommand(event)
-  );
+// Check if an entry is ours — handles both correct format {hooks: [...]}
+// and legacy flat format {type, command} from older versions
+function isOurEntry(entry, event) {
+  if (!entry) return false;
+  const cmd = hookCommand(event);
+  // Legacy flat format
+  if (entry.type === "command" && entry.command === cmd) return true;
+  // Correct matcher group format
+  if (
+    Array.isArray(entry.hooks) &&
+    entry.hooks.some((h) => h.type === "command" && h.command === cmd)
+  ) return true;
+  return false;
 }
 
 // Read settings.json with fail-closed semantics:
@@ -66,15 +72,19 @@ function installHooks() {
       settings.hooks[event] = [];
     }
 
-    // Remove any existing yessir hooks (exact match, handles path change / reinstall)
+    // Remove any existing yessir matcher groups (handles path change / reinstall)
     settings.hooks[event] = settings.hooks[event].filter(
-      (entry) => !isOurHook(entry, event)
+      (group) => !isOurEntry(group, event)
     );
 
-    // Add our hook
+    // Add our hook as a matcher group
     settings.hooks[event].push({
-      type: "command",
-      command: hookCommand(event),
+      hooks: [
+        {
+          type: "command",
+          command: hookCommand(event),
+        },
+      ],
     });
   }
 
@@ -101,7 +111,7 @@ function uninstallHooks() {
 
     const before = settings.hooks[event].length;
     settings.hooks[event] = settings.hooks[event].filter(
-      (entry) => !isOurHook(entry, event)
+      (group) => !isOurEntry(group, event)
     );
     removed += before - settings.hooks[event].length;
 
@@ -129,7 +139,7 @@ function isHooksInstalled() {
       const hooks = settings.hooks[event];
       return (
         Array.isArray(hooks) &&
-        hooks.some((e) => isOurHook(e, event))
+        hooks.some((group) => isOurEntry(group, event))
       );
     });
   } catch {
