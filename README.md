@@ -29,15 +29,6 @@ Claude Code → hook event → yessir-hook → HTTP → StateManager → TUI
 
 `yessir-hook` is a lightweight binary that Claude Code invokes on each lifecycle event. It forwards events to the `yessir` server. For `PermissionRequest` events, the response flows back to Claude Code as an allow/deny decision.
 
-## TUI controls
-
-| Key | Action |
-|-----|--------|
-| `j`/`k` or arrows | Navigate sessions |
-| `a` | Auto-allow permissions for selected session |
-| `d` | Clear auto-reply (manual mode) |
-| `q` | Quit |
-
 ## Commands
 
 ```bash
