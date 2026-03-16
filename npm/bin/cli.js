@@ -4,6 +4,7 @@ const path = require("path");
 const { spawn } = require("child_process");
 const { ensureBinary, uninstallBinary, readVersionInfo, isInstalled, BIN_DIR } = require("../lib/binary");
 const { installHooks, uninstallHooks, isHooksInstalled } = require("../lib/hooks");
+const { addToPath, removeFromPath, isPathConfigured } = require("../lib/shell");
 
 const USAGE = `Usage: yessir <command>
 
@@ -19,15 +20,23 @@ const command = process.argv[2] || "start";
 
 async function main() {
   switch (command) {
-    case "install":
+    case "install": {
       await ensureBinary();
       installHooks();
+      const profile = addToPath();
       console.log("\nyessir installed successfully!");
-      console.log("Run `npx @artshooter/yessir` to start the dashboard.");
+      if (profile) {
+        console.log(`Added ~/.yessir/bin to PATH in ${profile}`);
+        console.log("Restart your terminal, then run `yessir` to start the dashboard.");
+      } else {
+        console.log("Run `yessir` to start the dashboard.");
+      }
       break;
+    }
 
     case "uninstall":
       uninstallHooks();
+      removeFromPath();
       uninstallBinary();
       console.log("\nyessir uninstalled.");
       break;
@@ -41,8 +50,10 @@ async function main() {
       const info = readVersionInfo();
       const installed = isInstalled();
       const hooksOk = isHooksInstalled();
+      const pathOk = isPathConfigured();
       console.log(`Binary: ${installed ? `v${info?.version || "?"}  (${BIN_DIR})` : "not installed"}`);
       console.log(`Hooks:  ${hooksOk ? "configured" : "not configured"}`);
+      console.log(`PATH:   ${pathOk ? "configured" : "not configured"}`);
       break;
     }
 
