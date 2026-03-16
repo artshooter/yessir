@@ -96,4 +96,5 @@ module.exports = {
   addToPath,
   removeFromPath,
   isPathConfigured,
+  getProfilePath,
 };

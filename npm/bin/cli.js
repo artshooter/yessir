@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 const path = require("path");
-const { spawn } = require("child_process");
+const { spawn, execSync } = require("child_process");
 const { ensureBinary, uninstallBinary, readVersionInfo, isInstalled, BIN_DIR } = require("../lib/binary");
 const { installHooks, uninstallHooks, isHooksInstalled } = require("../lib/hooks");
 const { addToPath, removeFromPath, isPathConfigured } = require("../lib/shell");
@@ -24,13 +24,23 @@ async function main() {
       await ensureBinary();
       installHooks();
       const profile = addToPath();
-      console.log("\nyessir installed successfully!");
       if (profile) {
-        const shellName = path.basename(profile, path.extname(profile)).replace('.', '');
         console.log(`Added ~/.yessir/bin to PATH in ${profile}`);
-        console.log(`\nTo start using yessir now, run:\n  source ${profile}\n  yessir`);
-      } else {
+      }
+
+      // Check if yessir is available in the current shell
+      let inPath = false;
+      try {
+        execSync("which yessir", { stdio: "pipe" });
+        inPath = true;
+      } catch {}
+
+      const profilePath = profile || require("../lib/shell").getProfilePath();
+      console.log("\nyessir installed successfully!");
+      if (inPath) {
         console.log("Run `yessir` to start the dashboard.");
+      } else {
+        console.log(`\nTo start using yessir, open a new terminal tab or run:\n  source ${profilePath} && yessir`);
       }
       break;
     }

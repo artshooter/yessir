@@ -58,21 +58,21 @@ Instead, it stays focused on **live session awareness + permission flow control*
 Install and configure hooks automatically:
 
 ```bash
-npx @artshooter/yessir install
+npx -y @artshooter/yessir install
 ```
 
 Start the dashboard:
 
 ```bash
-npx @artshooter/yessir
+npx -y @artshooter/yessir
 ```
 
 Useful commands:
 
 ```bash
-npx @artshooter/yessir status
-npx @artshooter/yessir update
-npx @artshooter/yessir uninstall
+npx -y @artshooter/yessir status
+npx -y @artshooter/yessir update
+npx -y @artshooter/yessir uninstall
 ```
 
 This installs the binaries locally and adds the required Claude Code hooks to `~/.claude/settings.json`.
